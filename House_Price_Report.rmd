@@ -1,0 +1,1339 @@
+---
+title: "House Price in LA"
+author: "SM"
+date: "April 1, 2020"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+
+## Section 1
+
+
+Load the data
+
+```{r}
+library(readr)
+house_price <- read_csv("./dataset1.csv")
+
+
+summary(house_price)
+
+str(house_price)
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+#plotting histogram with fitted normal density
+#install.packages("rcompanion")
+library(rcompanion)
+#house_price$ValuePerSQFT <- house_price$LandValue/house_price$SQFTmain
+plotNormalHistogram(house_price$ValuePerSQFT)
+
+
+#testing for normality of distribution
+shapiro.test(house_price$ValuePerSQFT)
+
+```
+Since the p-value is small, the Shapiro test rejected the null hypothese of the data being normal. Hence, the response variable needs to be transformed to achieve normality.
+
+
+Now, perform Box-Cox Transformation
+
+```{r}
+#finding optimal lambda for Box-Cox tranformation
+#install.packages("MASS")
+library(MASS)
+
+BoxCox.fit<- boxcox(ValuePerSQFT ~ age+Bedrooms+Bathrooms+LandValue100K, 
+                    data=house_price, lambda = seq(-3,3,1/4), interp=FALSE)
+BoxCox.data<- data.frame(BoxCox.fit$x, BoxCox.fit$y)
+ordered.data<- BoxCox.data[with(BoxCox.data, order(-BoxCox.fit.y)),]
+ordered.data[1,]
+lambda = ordered.data[1, "BoxCox.fit.x"] #0.5
+```
+
+Based on the second output, the optimal lambda value to use for transformation is 0.5. Now, lets create function that performs a Box Cox transformation with a given lambda. The funciton also has an inverse agrument to revert the values after prediction.
+
+
+
+```{r}
+#Box Cox Transformation with lambda
+transform_data <- function(var, lambda, inverse=F){
+  
+  if(inverse==F){
+  new_variable <- (1/lambda)*(var^(lambda)-1)
+  }
+  else{
+    new_variable <- (lambda*var + 1)^(1/lambda)
+      
+  }
+  
+  return(new_variable)
+}
+
+
+```
+
+With the Box Cox transformation created, we will transform the response variable ValuePerSQFT and test to see if the function works correctly.
+
+```{r}
+#applying Box-Cox tranformation with lambda=0.5
+tt <- transform_data(var=house_price$ValuePerSQFT, lambda = lambda)
+
+identical(tt, 2*(sqrt(house_price$ValuePerSQFT)-1))
+```
+
+
+The function works and the next step is to test the normality of the transformed data using Shapiro Test.
+
+```{r}
+#plotting histogram for tranformed response
+plotNormalHistogram(tt)
+
+#testing for normality of distribution
+shapiro.test(tt)
+
+```
+
+The normality assumption is been met and now we apply the generalized linear model. The first thing to do is prepare the data by changing the data type of several features and split the data for training/testing.
+
+
+
+
+```{r}
+
+#convert Bedrooms and Bathrooms into integers
+house_price$Bedrooms <- as.integer(house_price$Bedrooms)
+house_price$Bathrooms <- as.integer(house_price$Bathrooms)
+
+attr(house_price, "spec") <- NULL
+
+set.seed(5)
+
+N = nrow(house_price)
+
+train_idx <- sample(1:N, size = round(0.8*N))
+eval_idx <- setdiff(1:N, train_idx)
+
+train_data <- house_price[train_idx, ]
+eval_data <- house_price[eval_idx, ]
+
+#transformed values of response variable
+train_data$target <- tt[train_idx]
+
+```
+
+
+With the data prepared, lets perform some data visualizations.
+
+```{r}
+#install.packages("ggplot2")
+library(ggplot2)
+
+#library(devtools)
+#install_github("ggobi/ggally")
+
+#install.packages("colorspace")
+#install.packages('Rcpp')
+#install.packages('GGally')
+
+library(GGally)
+
+#install.packages('digest')
+#library('digest')
+
+
+```
+
+```{r}
+train_data %>%
+  ggplot(aes(x=factor(Bedrooms), y=target, fill=factor(Bedrooms))) +
+  geom_boxplot()
+
+
+```
+
+The target variable decreases as the number of Bedrooms increases due to econmies of scale or agglomeration. More bedrooms require more space which increases area of the house. Hence, the  Since the target variable is the transformation of price per square foot, the price per SQFT increases as Bedrooms increases. Other than 6 Bedrooms, the variability of the target variable is similar across Bedrooms. Bedrooms is a good candidate to include in the model.
+
+
+
+```{r}
+ggplot(train_data, aes(x=factor(Bathrooms), y=target, fill=factor(Bathrooms))) +
+  geom_boxplot()
+
+
+```
+
+Unlike Bedrooms, target does not have similar variability across Bathrooms and it decreases only from 1 to 4 Bathrooms. 
+
+
+
+```{r}
+
+ggplot(train_data, aes(x=LandValue100K, y=target, color=factor(Bathrooms))) +
+  geom_point() + 
+  geom_smooth(method='lm', se=F) +
+  facet_wrap(~factor(Bathrooms))
+
+ggplot(train_data, aes(x=LandValue100K, y=target, color=factor(Bedrooms))) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F) +
+  facet_wrap(~factor(Bedrooms))
+
+ggplot(train_data, aes(x=LandValue100K, y=target)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F)
+
+```
+
+Before any candidate feature to include in GLM model, the feature must have linear relationship to the target variable. If not so, then apply transformation to find a linear relationship or remove the feature as a candidate for the GLM model.
+
+The target variable has been consistenly decreases as the LandValue100K, the price per square foot increases among both Bathrooms and Bedrooms. The third output has a linear trend between LandValue100K and target.
+
+
+
+
+
+```{r fig.height=7, fig.width=7}
+ggplot(train_data, aes(x=age, y=target, color=factor(Bedrooms))) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F) +
+  facet_wrap(~factor(Bedrooms))
+
+ggplot(train_data, aes(x=age, y=target, color=factor(Bathrooms))) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F) +
+  facet_wrap(~factor(Bathrooms))
+
+ggplot(train_data, aes(x=age, y=target)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F)
+
+```
+Note: low age means recent developed house while high age means old house. The slope of target with respect to age is positive for all number of Bedrooms except 5. For Bathrooms, the slopes is not as consistent especially numbers 4,5,6,and 7. Instances of Bathrooms 6 and 7 have limited observations to indicate the trend between age and target, while 5 Bathrooms have a large positive slope compared to Bathrooms 1,2,3. Lastly, 4 Bathrooms has a negative slope.
+In the third output, the overall trend between age and target is a positive slope
+
+
+```{r}
+ggplot(train_data, aes(x=SQFTmain, y=target, color=factor(Bedrooms))) +
+  geom_point() +
+   geom_smooth(method = 'lm', se=F) +
+  facet_wrap(~factor(Bedrooms))
+
+ggplot(train_data, aes(x=SQFTmain, y=target, color=factor(Bathrooms))) +
+  geom_point() +
+   geom_smooth(method = 'lm', se=F) +
+  facet_wrap(~factor(Bathrooms))
+
+ggplot(train_data, aes(x=SQFTmain, y=target)) +
+  geom_point() +
+   geom_smooth(method = 'lm', fullrange=T, se=F, aes(colour="lm"), linetype=1) +
+    geom_smooth(se=F, fullrange=T, aes(colour="loess"), linetype=2) +
+  scale_colour_manual(name="legend", values=c("green", "blue")) +
+  scale_linetype_discrete(name = "legend")
+
+
+```
+
+In the first and second output, there seems to be a nonlinear trend between SQFTmain and target. Looking at the third output, the loess function and the linear function is different. This trend suggest a possible nonlinear association between SQFTmain and target. SQFTmain looks to maybe have a quadratic relationship with the target feature. To compare perform, lets add a quadratic term for the model.
+
+
+```{r fig.height=10, fig.width=10}
+#ggpairs(train_data, columns = c(2,3,4,5,6,8))
+
+```
+
+
+```{r}
+#sqft_tr = (5200 - SQFTmain)^2
+
+library(dplyr)
+
+#creates a new variable that gets the total number of Bathrooms and Bedrooms
+#the other new variable gets the squared value of SQFTmain
+train_data1 <- train_data %>%
+  mutate(Total_household = Bathrooms + Bedrooms, SQFT_2 = SQFTmain^2) #training set
+
+eval_data1 <- eval_data %>%
+  mutate(Total_household = Bathrooms + Bedrooms, SQFT_2 = SQFTmain^2) #testing set
+
+```
+
+
+```{r fig.height=18, fig.width=18}
+ggpairs(train_data1, columns = c(2,3,6,4,5,9,10,8))
+```
+
+For the distribution of age, the older the property usually the bigger the square footage and as time goes on there is a scarcity of land thus resulting in denser newer developments. There is high correlation between SQFTmain and the variables Bedrooms and Bathrooms. This is an issue with multicollinearity which will be addressed. The selection of the variables in the model would suggest using either SQFTmain without Bedrooms and Bathrooms or Bedrooms/Bathrooms without SQFTmain.
+
+There is an potential issues of multi-collinearlity on variables Bedrooms, Bathrooms, SQFTmain, and Total_households. Since Total_households is the summation of Bathrooms and Bedrooms, either Total_household is used or Bedrooms/Bathrooms. Bathrooms is strongly correlated to the predictors age, SQFTmain, Bedrooms, and Total_households. Hence, Bathrooms is expected to be not a good predictor to include in the model. The remaining options to add are Bedrooms, SQFTmain, or Total_households. Based on the previous plots, age and LandValue100K are consistently good predictors to use.
+
+```{r}
+#install.packages('caret')
+#install.packages('ipred')
+```
+
+```{r warning=FALSE}
+library(caret)
+
+control <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+
+train(target ~ age + poly(SQFTmain,2) + LandValue100K, data = train_data1, method='lm', trcontrol = control) #prefer this model
+train(target ~ age + Total_household + LandValue100K, data = train_data1, method='lm', trcontrol = control)
+train(target ~ age + Bedrooms + LandValue100K, data = train_data1, method='lm', trcontrol = control)
+train(target ~ age + Bathrooms + LandValue100K, data = train_data1, method='lm', trcontrol = control)
+
+```
+
+Note: k-fold cross validation is when you randomly split the data into k parts where each part leftover is used for validation while k-1 parts are for training. Repeated k-fold cross validation randomly splits the data n times which makes n different k-fold cross validation. Using repeated k-fold cross validation, the 2nd order polynomial function of SQFTmain is the preferred feature to add with age and LandValue100K.
+
+```{r}
+library(car)
+print('model with age, LandValue100K, and quadratic form of SQFTmain:')
+vif(lm(target ~ age + poly(SQFTmain, 2)  + LandValue100K, data = train_data1))
+print('model with age, LandValue100K, and Bedrooms:')
+vif(lm(target ~ age + Bedrooms  + LandValue100K, data = train_data1))
+print('model with age, LandValue100K, and Bathrooms:')
+vif(lm(target ~ age + Bathrooms  + LandValue100K, data = train_data1))
+print('model with age, LandValue100K, and Total_household:')
+vif(lm(target ~ age + Total_household + LandValue100K, data = train_data1))
+```
+The variance inflation rate for all models are adequate since the values are less than 4. The variance inflation rate of the 2nd order polynomial function of SQFTmain is valid. Now, the next thing to check is the residual assumption such as homogeneity of variance, constant mean 0, low leverage, low influence, normality, and constant scale (variance).  
+
+```{r}
+model2 <- lm(target ~ age + SQFTmain + SQFT_2 + LandValue100K, data = train_data1)
+```
+
+
+We will display cook's distance and find the most influential data points in the model to remove. Once the observations are dropped, the residuals are checked again and the process is repeated until the influence is small. Note: the 3 largest Cook's distance values appear at a time. So, the data is filtered 3 observations at time until there not many stand out values in Cook's Distance plot (output 1) and the standardized residuals are within the Cook's distance curve over leverage (output 2).
+
+```{r}
+
+cutoff <- 4/((nrow(train_data1) - length(model2$coefficients) - 2))
+plot(model2, which = 4, cook.levels = cutoff)
+plot(model2, which = 5, cook.levels = cutoff)
+
+```
+
+
+Looking at Cook's distance (output 1) and the standardized residuals over leverage (Output 2), some of the observations need to be removed to get less extreme cases in the data. The pattern is to remove the 3 data points with the highest Cook's Distance and name the first filtered dataframe as filter_data1. The repeat this process until the largest influential points do not stand out to other influential points. For this instance, we have to remove 30 outliers (filter_data1 - filter_data10); the code below executes this strategy as the finished code. Note: The procedure in the code below starts by running the last 4 lines to display the Cook's Distance plot which also identiifies the 3 largest influential points. Then, we remove/filter the 3 largest influential point where the first data is called filter_data1 located in the first line of code. Next, we change lm() where the data train_data1 is replaced with filter_data1. Then, we rerun the last 4 lines of code to find the next 3 largest influential points and remove those data points(filter_data2) similar to the previous step. We repeat the process until the 3 largest influential points are not as large compared to other points and the leverage plot (output 2) has the curve within the boundary. 
+
+
+```{r}
+filter_data1 <- train_data1[-which(rownames(train_data1) %in% c(173, 480, 515)), ]
+filter_data2 <- filter_data1[-which(rownames(filter_data1) %in% c(271, 309, 703)), ]
+filter_data3 <- filter_data2[-which(rownames(filter_data2) %in% c(132, 145, 370)), ]
+filter_data4 <- filter_data3[-which(rownames(filter_data3) %in% c(119, 250, 422)), ]
+filter_data5 <- filter_data4[-which(rownames(filter_data4) %in% c(115, 366, 713)), ]
+filter_data6 <- filter_data5[-which(rownames(filter_data5) %in% c(226, 595, 699)), ]
+filter_data7 <- filter_data6[-which(rownames(filter_data6) %in% c(391, 589, 666)), ]
+filter_data8 <- filter_data7[-which(rownames(filter_data7) %in% c(353, 589, 691)), ]
+filter_data9 <- filter_data8[-which(rownames(filter_data8) %in% c(300, 358, 366)), ]
+filter_data10 <- filter_data9[-which(rownames(filter_data9) %in% c(108, 341, 392)), ] #best value
+#filter_data11 <- filter_data10[-which(rownames(filter_data10) %in% c(55, 509, 703)), ]
+#filter_data12 <- filter_data11[-which(rownames(filter_data11) %in% c(402, 539, 655)), ]
+#filter_data13 <- filter_data12[-which(rownames(filter_data12) %in% c(76, 125, 526)), ]
+#filter_data14 <- filter_data13[-which(rownames(filter_data13) %in% c(97, 198, 375)), ]
+#filter_data15 <- filter_data14[-which(rownames(filter_data14) %in% c(196, 646, 649)), ]
+#filter_data16 <- filter_data15[-which(rownames(filter_data15) %in% c(267, 616, 673)), ]
+#filter_data17 <- filter_data16[-which(rownames(filter_data16) %in% c(15, 343, 452)), ]
+
+model <- lm(target ~ age + SQFTmain + SQFT_2 + LandValue100K, data = filter_data10)
+cutoff <- 4/((nrow(filter_data10) - length(model$coefficients) - 2))
+plot(model, which = 4, cook.levels = cutoff)
+plot(model, which = 5, cook.levels = cutoff)
+
+```
+The first output has the largest influencial points that are not as distinct compared to the other points unlike the previous output 1 prior to removing the outliers. The second output has the standarized residuals and leverage curve inside the boundary unlike the previous output 2.
+
+```{r warning=FALSE}
+train(target ~ SQFTmain + SQFT_2 + LandValue100K, data = filter_data7, method='lm', trcontrol = control)
+train(target ~ age + SQFTmain + SQFT_2 + LandValue100K, data = filter_data10, method='lm', trcontrol = control)
+
+```
+
+The first training model above filtered 21 outliers (7*3), while the second training model filtered 30 outliers (10*3). The model improved when cooks distance assumption is met based on the RMSE(root mean squared error), Rsquared(R2), and MAE(mean absolute error) (because RMSE went down, Rsquared went up, and MAE went down).
+
+
+```{r}
+#library(gridExtra)
+
+#install.packages('gridExtra')
+library(gridExtra)
+
+```
+
+```{r}
+
+temp1 <- ggplot(filter_data10, aes(x=LandValue100K, y=target)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F, color='red')
+
+temp2 <- ggplot(train_data, aes(x=LandValue100K, y=target)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F)
+
+grid.arrange(temp1, temp2, ncol=1, nrow=2)
+
+```
+
+There is still a linear relationship between LandValue100K and target, but the filtered data (top) looks smoother. The bottom plot has outliers of LandValue100K > 6 that are far away from the blue line.
+
+```{r fig.height=7, fig.width=7}
+
+temp1 <- ggplot(filter_data10, aes(x=age, y=target)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F, color='red')
+
+temp2 <- ggplot(train_data, aes(x=age, y=target)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se=F)
+
+grid.arrange(temp1, temp2, ncol=1, nrow=2)
+
+```
+There is not much difference between the top plot (filtered data) and bottom plot (train data) unlike the previous plot other than the points farthest from the trend are removed.
+
+
+```{r}
+
+temp1 <- ggplot(filter_data10, aes(x=SQFTmain, y=target)) +
+  geom_point() +
+   geom_smooth(method = 'lm', fullrange=T, se=F, aes(colour="lm"), linetype=1, color='red') +
+    geom_smooth(se=F, fullrange=T, aes(colour="loess"), linetype=2) +
+  scale_colour_manual(name="legend", values=c("blue", "red")) +
+  scale_linetype_discrete(name = "legend")
+
+temp2 <- ggplot(train_data, aes(x=SQFTmain, y=target)) +
+  geom_point() +
+   geom_smooth(method = 'lm', fullrange=T, se=F, aes(colour="lm"), linetype=1) +
+    geom_smooth(se=F, fullrange=T, aes(colour="loess"), linetype=2) +
+  scale_colour_manual(name="legend", values=c("green", "blue")) +
+  scale_linetype_discrete(name = "legend")
+
+grid.arrange(temp1, temp2, ncol=1, nrow=2)
+
+```
+
+By removing the outliers, the filtered data looks closer to being linear between SQFTmain and target. In terms of coefficent interpretation, using SQFTmain as a linear relationship rather than quadratic is easier. However; quadratic is useful for prediction. For this thesis, we want to maximize predictive performance.
+
+There is imporovement filtering the data 10 times versus 7 with a lower root mean squared error, r squared, and mean absolute error.
+
+```{r}
+
+library(MuMIn)
+
+Metric <- function(model){
+num_var = length(model$coefficients) - 1
+print(paste0('BIC : ', BIC(model)))
+print(paste0('AIC : , ', AIC(model)))
+print(paste0('Sigma : ',  round(sigma(model), 3)))
+}
+
+```
+
+
+Next, create functions where one gets the BIC, AIC, and Sigma while the other obtains the root mean squared error, r squared, and mean absolute error to test on the holdout/evaluation set. 
+
+```{r}
+library(Metrics)
+
+metrics_mod <- function(model, test_data, target_name="ValuePerSQFT", lambda=0.5, include_metric=F, invert=F){
+
+if(include_metric){  
+Metric(model)
+}
+
+if(invert){    
+pred1a <- transform_data(predict(model, test_data), lambda=lambda, inverse=T)
+#target = test_data[[target_name]]
+}
+else{
+  pred1a <- predict(model, test_data)  
+  }
+  
+#residual <- test_data[[target_name]] - pred1a  
+
+print(paste0('RMSE: ', rmse(actual = test_data[[target_name]], predicted = pred1a)))
+print(paste0("R squared: ", cor(pred1a, test_data[[target_name]])^2 ))
+#print(paste0('R squared: ', 1 - var(test_data[[target_name]] - pred1a)/var(test_data[[target_name]]) ))
+print(paste0('MAE: ', mae(actual = test_data[[target_name]], predicted = pred1a)))
+  
+}
+
+
+```
+
+
+The next function is to predict an example to see how the predictors behave to the response variable. Note: the user must know whether Box-Cox Transformation is used in the model or not based on the invert argument; True means reverse Box Cox Transformation on the prediction into order to get Price Per SQFT. Lambda is the parameter to use for transformation.
+
+```{r}
+
+sample_predict <- function(model, invert=F, lambda=0.5, age=0, Bedrooms=0, Bathrooms=0, LandValue100K=0, SQFTmain=0){
+  
+pred.tr.ValuePerSQFT <- predict(model, data.frame(age = age, Bedrooms = Bedrooms, Bathrooms = Bathrooms, LandValue100K = LandValue100K, SQFTmain = SQFTmain, SQFT_2 = SQFTmain^2, Total_household = Bedrooms + Bathrooms))
+
+if(invert){
+  print(paste0('predict sample: ', pred.ValuePerSQFT <- transform_data(pred.tr.ValuePerSQFT, lambda=lambda, inverse=T)))
+}
+else{
+  print(paste0('predict sample: ', pred.ValuePerSQFT <- pred.tr.ValuePerSQFT))
+}
+
+}
+
+sample_predict(model, invert=T, age=3, Bedrooms=2, LandValue100K = 2.5, SQFTmain = 1700)
+sample_predict(model, invert=T, age=10, Bedrooms=2, LandValue100K = 2.5, SQFTmain = 1700)
+
+
+```
+
+install and load ggResidpanel to analyze residuals of a model
+
+```{r}
+#install.packages("devtools")
+#devtools::install_github("goodekat/ggResidpanel")
+library(ggResidpanel)
+
+```
+
+
+
+```{r fig.height=8, fig.width=10}
+
+resid_panel(model, plots="all", qqbands = T)
+
+resid_xpanel(model, yvar="response")
+
+```
+
+The top left figure is the residual plot which should have values centered around zero. top center figure is the obersation index versus the residuals which also behave similar to the residual plot. The top right plot is response vs predicted which should be within the trend. The center left is the qqplot which should have points within the line to represent the normality assumption. The middle plot is a histogram which should validate the behavior of the qqplot. The middle right is the boxplot of the residuals which should have a box centered around zero, the wiskers look fairly even(not much skew), and the outliers are limited. The bottom right(Residual-Leverage plot) and bottom left (Cook's D Plot) are the same as the previous plot for testing outliers. The bottom center plot is location-Scale plot which should even spread across the predicted values to make sure the residuals mets the assumption of equal variance (homoscedasticity). The assumptions are met pretty well.
+
+```{r fig.height=18, fig.width=18}
+
+ggpairs(filter_data10, columns = c(2,3,6,10,7))
+
+```
+
+Now that the model for the Box-Cox approach is completed, we will able Gamma Regression. Lets assume the target variable (PricePerSQFT) is distributed in a gamma distribution instead of transforming the data to become normally distributed for Generalized Linear Regression. We will use the same features from the previous model since the plots above indicate similar relationships as the transformed variable.
+
+```{r}
+
+#fitting gamma regression 
+summary(fitted.Gmodel<- glm(ValuePerSQFT ~ age + SQFTmain + SQFT_2 + LandValue100K, data=train_data1,
+family=Gamma(link=identity) ))
+
+#get the BIC, AIC, and Sigma value of the model
+Metric(fitted.Gmodel)
+
+print("")
+#get the performance metrics of the testing data to see how well the model did
+metrics_mod(fitted.Gmodel, test_data = eval_data1)
+
+```
+The model seems to perform well consider the amount of variation is accounted in the model and the deviation relative to PricePerSQFT do not look too bad (RMSE and MAE)
+
+
+```{r fig.height=8, fig.width=10}
+resid_panel(fitted.Gmodel, plots = "all", qqbands = T)
+```
+However; the residual assumption do not look good. The Residual plot deviates away from zero when it comes to high and low predicted values. This is also reflected in the Response vs Predicted plot. The qq-plot and boxplot clearly have a lot of outliers. Cook's D plot has at least 6 very influential points and the location-scale plot values is high in instances of extreme predicted values. We have to detect the outliers using Cook's distance similarly to method used on the previous model.
+
+Note: filter_data overwrites the previous filter_data from the previous model and the data points filtered are not necesarily all the same index locations.
+
+
+```{r fig.height=8, fig.width=10}
+
+
+filter_data1 <- train_data1[-which(rownames(train_data1) %in% c(85, 480, 706)), ]
+filter_data2 <- filter_data1[-which(rownames(filter_data1) %in% c(271, 427, 513)), ]
+filter_data3 <- filter_data2[-which(rownames(filter_data2) %in% c(172, 186, 682)), ]
+
+filter_data4 <- filter_data3[-which(rownames(filter_data3) %in% c(144, 281, 527)), ]
+filter_data5 <- filter_data4[-which(rownames(filter_data4) %in% c(131, 227, 304)), ]
+filter_data6 <- filter_data5[-which(rownames(filter_data5) %in% c(209, 247, 698)), ]
+filter_data7 <- filter_data6[-which(rownames(filter_data6) %in% c(118, 362, 593)), ]
+filter_data8 <- filter_data7[-which(rownames(filter_data7) %in% c(339, 395, 513)), ]
+filter_data9 <- filter_data8[-which(rownames(filter_data8) %in% c(107, 364, 746)), ]
+filter_data10 <- filter_data9[-which(rownames(filter_data9) %in% c(354, 541, 689)), ]
+
+Gmodel <- glm(ValuePerSQFT ~ age + SQFTmain + SQFT_2 + LandValue100K, data = filter_data10, family = Gamma("identity"))
+#cutoff <- 4/((nrow(filter_data10) - length(Gmodel$coefficients) - 2))
+#plot(Gmodel, which = 4, cook.levels = cutoff)
+#plot(Gmodel, which = 5, cook.levels = cutoff)
+
+resid_panel(Gmodel, plots="all", qqbands = T)
+
+```
+The first plot (Cook's Distance) have less points influential relative to other points. The second plot (Residuals vs Leverage) has the curve within the boundary which is good. The third plot is residual plot diagnosis which match the neccessary assumptions to use Gamma Regression.
+Note: you could ignore the first two plot since it matches the plots for the bottom left and bottom right.
+
+The prediction from both Gaussian and glm model is similar.
+
+
+```{r}
+print("Generalized linear model:")
+metrics_mod(model, test_data = eval_data1, invert = T)
+
+print("")
+
+print("Gamma regression:")
+metrics_mod(Gmodel, test_data = eval_data1)
+
+```
+
+The GLM model performed better compared to the Gamma regression model. The Root mean squared error predicted 4 cents better for GLM. The R squared value went up 3 percent more for GLM. It also predicted 3 cents better when comes to Mean absolute error.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Section 2
+
+The next data set to analyze is from Zillow where the sequence of month-year pair registers a price per sqrt foot identified for each city. Later in the analysis, we discovered that there are multiple squences with the same city. This makes sense since there are different patterns of price per sqrt foot within the same city due to market wihtin the city. 
+```{r}
+#library(readr)
+Monthly_rent <- read_csv("./dataset2.csv")
+
+longform_MR <- read_csv("./longformdataset2.csv")
+
+# print('Columns:')
+# print(colnames(longform_MR))
+# print('Cities:')
+# print(unique(longform_MR$City))
+
+```
+
+
+
+
+```{r}
+length(unique(longform_MR$City))
+
+length(unique(Monthly_rent$City))
+
+head(longform_MR)
+
+```
+
+Want to look at the time series of monthly rent for some cities
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+#City, MonthYear, PricePERSQFT
+longform_MR %>%
+  filter(City %in% c('Homestead', 'Los Angeles', 'Delaware', 'Middletown', 'West New York', 'Riverdale', 'Brooklyn Park', 'Denver', 'Houston')) %>%
+  ggplot(aes(x=MonthYear, y=PricePerSQFT, col=City)) +
+  geom_line() +
+  facet_wrap(.~City) +
+  theme(legend.position='none')
+
+
+```
+The sample plot is a time series of several cities. The goal would be to group these trends using k-cluster and apply it to a GEE model and Generalized Mixed Effect model. 
+
+
+
+```{r}
+
+#next exercise
+#purr is a library for K-means clustering
+library(purrr)
+
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss <- map_dbl(1:10,  function(k){
+  model <- kmeans(x = Monthly_rent[, 2:76], nstart = 1, iter.max = 15, centers = k)
+  model$tot.withinss
+})
+
+# Generate a data frame containing both k and tot_withinss
+elbow_df <- data.frame(
+  k = 1:10 ,
+  tot_withinss = tot_withinss
+)
+
+
+# Plot the elbow plot
+ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10)
+
+```
+
+
+Looks like clusters 2-5 is reasonable. The elbow method suggests two clusters should be implemented. Now, we want to see how similar each observation is within its cluster. This is achieved by creating a Silhouette plot which is a way to interpret how well each point is classified within a cluster.
+
+```{r fig.height=16, fig.width=16}
+
+library(cluster)
+
+# Generate a k-means model using the pam() function with a k = 2
+monthly_rent <- Monthly_rent[, 2:76]
+pam_k <- pam(monthly_rent, k = 2)
+
+# Plot the silhouette visual for the pam_k2 model
+plot(silhouette(pam_k))
+
+
+
+# Use map_dbl to run many models with varying value of k
+sil_width <- map_dbl(2:10,  function(k){
+  model <- pam(x = Monthly_rent[, 2:76], k = k)
+  model$silinfo$avg.width
+})
+
+# Generate a data frame containing both k and sil_width
+sil_df <- data.frame(
+  k = 2:10,
+  sil_width = sil_width
+)
+
+# Plot the relationship between k and sil_width
+ggplot(sil_df, aes(x = k, y = sil_width)) +
+  geom_line() +
+  scale_x_continuous(breaks = 2:10)
+
+
+
+
+```
+
+The first plot is the Sihouette width of across the clusters where each observation is judged (for this instance we used 2 clusters). Generally, Sihouette widths between 0.5 and 1 is pretty good while 0.5 and 0 is questionable, anything below 0 is bad. There were several chunks of observations off in the cluster 1 (negative values) while cluster 2 did really well. The second plot is the average Sihouette width for each selected cluster (2-10). Based on the plot of average Siloutte width, the recommended k value is 2. The most tolerence of k is perhaps 6 since the width peaks again at that position.
+
+Next step would be to incorporate the clusters into the data and compare the trends for each cluster.
+
+
+```{r}
+
+
+library(tidyr)
+
+N2 <- nrow(Monthly_rent)
+#Monthly_Rent1 <- spread(longform_MR, key = MonthYear, value = PricePerSQFT, -City)
+
+# Build a kmeans model
+model_km2 <- kmeans(monthly_rent, centers = 2)
+model_km3 <- kmeans(monthly_rent, centers = 3)
+model_km4 <- kmeans(monthly_rent, centers = 4)
+model_km6 <- kmeans(monthly_rent, centers = 6)
+
+# Extract the cluster assignment vector from the kmeans model
+clust_km2 <- model_km2$cluster
+clust_km3 <- model_km3$cluster
+clust_km4 <- model_km4$cluster
+clust_km6 <- model_km6$cluster
+
+# Create a new dataframe appending the cluster assignment
+Monthly_rent_km2 <- Monthly_rent %>%
+        mutate(clusterTwo = clust_km2, clusterThree = clust_km3, clusterFour = clust_km4, clusterSix = clust_km6, index = 1:N2)
+
+```
+
+When looking for cities that intersect with different cluster values, it indicates there are different behavior within city because the real-estate market varies on location.
+This instance occurred only for two clusters while clusters 4 and 6 have no intersection between cities.
+
+
+It looks like there is an issue with combining cluster and city. Some cities are duplicated in Monthly_rent dataframe which is normal.
+Many patterns of price within each city varies between different location. 
+The code below resolves this issue. It requires using an index placeholder to keep tract of the corresponding cluster and city pair. Then, we use gather function to transform the wide-long format of the data.
+
+Now, we plan to transform the Montly Rent dataframe into a longform manually to address issue with joining clusters to respective cities because somes cities have multiple clusters.
+
+
+```{r }
+
+longform_km2 <- gather(Monthly_rent_km2, key = "MonthYear", value = "PricePerSQFT", -clusterTwo, -clusterThree, -clusterFour, -clusterSix, -City, -index) 
+
+months <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+library(car)
+
+longform_km2_new <- longform_km2 %>%
+                      separate(MonthYear, c("Month", "Year"), "_") %>%
+                      mutate(Year = as.numeric(Year), Month_num = Recode(Month, " 'Jan' = 1; 'Feb' = 2; 'Mar' = 3; 'Apr' = 4;
+                                                                         'May' = 5; 'Jun' = 6; 'Jul' = 7; 'Aug' = 8; 'Sep' = 9;
+                                                                         'Oct' = 10; 'Nov' = 11; 'Dec' = 12 "), month = Month_num + 12*(Year - 10) -10)  
+
+
+
+```
+
+
+```{r}
+longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterTwo), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterTwo)
+
+longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterThree), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterThree)
+
+longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterFour), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterFour)
+
+longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterSix), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterSix)
+
+```
+
+```{r fig.height=12, fig.width=20}
+p1<-longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterTwo), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterTwo)
+
+p2<-longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterThree), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterThree)
+
+p3<-longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterFour), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterFour)
+
+p4<-longform_km2_new %>%
+  ggplot(aes(x = month, y = PricePerSQFT, color=factor(clusterSix), group=index)) +
+  geom_line() +
+  facet_wrap(~clusterSix)
+
+library(gridExtra)
+
+grid.arrange(p1, p2, p3, p4, nrow=2)
+
+
+```
+
+
+The first plot is PricePerSQFT vs month of a given index(city/cluster set) across two clusters. The second plot is same as the first plot but with 4 clusters while the third uses 6 clusters. There appears to be a clear separation in terms of PriceSQFT in the first plot while there is a good amount of overlap on the other plots. Hence, we have more assurance that 2 clusters is the perferred choice to implement in the model.
+
+
+
+******************************************************************************************************************************************************************
+
+
+WE NOW BEGIN GENERAL MIXED EFFECTS MODEL STEPS / INVESTIGATION
+
+The next step is to figure out what distribution the target variable PricePerSQFT belongs to.
+
+```{r}
+library(MuMIn)
+#library(rcompanion)
+#check what distribution is for response variable PricePerSQFT
+plotDensityHistogram(longform_km2_new$PricePerSQFT)
+
+```
+
+There is a right skewness in the data which may indicate the distribution is not normal. Possible candidates can be found easier by using the fitdistrplus package.
+
+
+```{r}
+
+library(fitdistrplus)
+descdist(longform_km2_new$PricePerSQFT, discrete = FALSE)
+```
+
+```{r}
+#seems like the response variable belongs to the gamma distribution
+
+gamma_dist <- fitdist(longform_km2_new$PricePerSQFT, "gamma")
+#gamma_log_dist <- fitdist(log(longform_km2_new$PricePerSQFT), "gamma")
+
+plot(gamma_dist)
+#plot(gamma_log_dist)
+
+```
+
+Other than the qq-plot being slightly questionable, all figures above suggest the response is from the gamma distribution. Next, use this know to add the agrument family = gamma(link = 'log') for the glmer function.
+
+The next chunk of code is to add the clusters to the dataframe and split the training/testing set by separating the first 65 months of each index/city-location pair.
+
+```{r}
+
+#fitting random slope and intercept Gamma model 
+#install.packages("lme4") 
+library(lme4)
+
+longform_km2_new$MonthYear <- longform_km2_new$month/100
+longform_km2_new$clusterTwo <- relevel(as.factor(longform_km2_new$clusterTwo), ref=1)
+longform_km2_new$clusterThree <- relevel(as.factor(longform_km2_new$clusterThree), ref=1)
+longform_km2_new$clusterFour <- relevel(as.factor(longform_km2_new$clusterFour), ref=1)
+longform_km2_new$clusterSix <- relevel(as.factor(longform_km2_new$clusterSix), ref=1)
+
+#set.seed(3)
+#N1 = nrow(longform_km2_new)
+
+#train_idx2 <- sample(1:N1, size = round(0.9*N1))
+#eval_idx2 <- setdiff(1:N1, train_idx2)
+
+#train_data2 <- longform_km2_new[train_idx2, ]
+#eval_data2 <- longform_km2_new[eval_idx2, ]
+
+filter2 <- longform_km2_new$month %in% 1:65
+train_data2 <- longform_km2_new[filter2, ]
+eval_data2 <- longform_km2_new[!filter2, ]
+
+
+#saveRDS(train_data1, 'train_data1.Rds')
+#saveRDS(eval_data1, 'eval_data1.Rds')
+
+
+train_data3 <- train_data2 %>%
+  arrange(index, MonthYear)
+
+
+
+#summary(glmer(PricePerSQFT ~ cluster + MonthYear + (1 + MonthYear|City), 
+ #             data=train_data1, family=Gamma(link = "inverse")))
+
+
+```
+
+
+begin writing solution code
+
+Generalized Mixed-Effect Regression
+
+```{r}
+#packages to install
+#install.packages('lme4')
+
+library(lme4)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(MuMIn)
+library(Metrics)
+
+```
+
+The details of the Generalized Mixed-Effect model are in page 4 of the notes. Basically, the data is collected longitudinally at times. The name GME model is combination of fixed coefficients and random effect coefficient/terms.
+
+```{r}
+
+#generalized mixed-effect regression
+summary(rm_model <- glmer(PricePerSQFT ~ clusterTwo + MonthYear + (MonthYear|index), data=train_data3, family=Gamma(link = "identity")))
+
+```
+The prediction of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}x_{1ij} +\beta_{2}t_{j} + \mu_{1i} + \mu_{2i}t_{j}$$
+where $\beta_{0}$ is the intercept, $\beta_{1}$ is the coefficient of the cluster(clusterTwo), $\beta_{2}$ is the slope of time(MonthYear), $\mu_{1i}$ is the random intercept from a normal distribtution, and $\mu_{2i}$ is the random slope from a normal distribution. Note: $\mu_{1i}$ ~ $N(0, \sigma_{\mu_{1}}^2)$ and $\mu_{2i}$ ~ $N(0, \sigma_{\mu_{2}}^2)$.
+
+Then,
+$$g(E(y_{ij})) = 0.91456 + 0.46910*x_{1ij} + 0.40133*t_{j}$$
+where g() is the gamma distribution as the link function. 
+
+
+
+The standard deviance for the model is -251073.9 which seems pretty good.
+
+$$\sigma_{\mu_{1}}^2=0.00279$$
+$$\sigma_{\mu_{2}}^2=0.01176$$
+$$\sigma^2=0.00146$$
+$$\sigma_{\mu_{1}\mu_{2}}=-0.18$$
+
+Note: $\mu_{1i}$ ~ $N(0, 0.00279)$ and $\mu_{2i}$ ~ $N(0, 0.01176)$.
+
+Now, we'll look at the residuals of the model
+
+```{r}
+library(ggResidpanel)
+
+resid_panel(rm_model, plots = "all", qqbands = T, qqline = T, type = "response")
+
+```
+
+There is some issues with the tails of the qqplot. The Response vs Predicted plot has weaker predictions for larger values based on the right side of the plot. The qqplot and boxplot both have a lot of outliers from left to right side.
+
+
+```{r}
+#summary(rm_model2 <- glmer(PricePerSQFT ~ clusterFour + MonthYear + (MonthYear|index), data=train_data3, family=Gamma(link = "identity")))
+
+```
+
+```{r}
+#summary(rm_model3 <- glmer(PricePerSQFT ~ clusterSix + MonthYear + (MonthYear|index), data=train_data3, family=Gamma(link = "identity")))
+
+```
+
+
+
+```{r}
+
+resid_xpanel(rm_model, yvar = "response", type = "response")
+resid_xpanel(rm_model, type = "response")
+```
+There is smaller variation of the residual for cluster 1 which makes sense. The siholuette width had a lot of high values hence many of the observations in cluster 1 where compatible for the model. The MonthYear and Residuals has a cylical trend which may violate the residual assumption since the residuals appears to be time dependent. It could be addressed using time-series but we will ignore it due to amount of content. 
+
+
+```{r}
+
+metrics_mod(rm_model, test_data = eval_data2, target_name = "PricePerSQFT")
+
+#pred1a <- predict(rm_model, newdata = eval_data1, type = 'response')
+
+#print(paste0('RMSE: ', rmse(actual = eval_data1$PricePerSQFT, predicted = pred1a)))
+
+```
+The model seem to address 99 percent of the variablility and has a root mean squared error of 5.4 cents on the test data.
+
+
+*****************************************************************************************************************************************************************************
+
+Generalized estimating equation model
+
+The descriptions of GEE model are in pages 5 and 6. Unlike the mixed effects model, we will trial clusters 4 and 6 as well. The polynomial formula of each model coded came through trial and error until the best QIC is found. Then, the best QIC is recorded and compared with the other clusters for every covariance structure. Next, we check the residual assumptions of the best model for each covariance structure. The three covariance structures used for this thesis are autoregressive, independent, and exchangeable. The details of each variance structure are in page 7. The plus symbol of page 7 shows the matrix system to solve for the $\beta$ coefficients. 
+
+
+```{r}
+
+#install.packages("geepack")
+#install.packages("MuMIn") 
+library(geepack) 
+
+
+#library(MuMIn)
+
+```
+
+# ```{r fig.height=16, fig.width=16}
+# library(GGally)
+# ggpairs(train_data3, columns = c(2,3,4,8,11) )
+# #ggpairs(train_data3, columns = c(2,8,11))
+# ```
+# The column of plots for PricePerSQFT has different values(PricePerSQFT) across varies clusters, the histogram shows it is a gamma distribution shown from previous analysis, and there is a time dependency of price across MonthYear. The MonthYear column of plots show even distribution of instances/observations for all clusters.
+
+The first trial is a autogressive variance structure with 3 different clusters. The first model is a autoregressive term with two clusters in the form of $intercept + cluster + cluster:MonthYear^2$, index as id, and gamma distribution is family function for the response variable (PricePerSQFT).
+
+```{r}
+
+#fitting GEE model with autoregressive working correlation matrix
+summary(ar1.fitted.model <- geeglm(PricePerSQFT ~ clusterTwo + clusterTwo:I(MonthYear^2) , data=train_data3, id=index, family=Gamma(link = "identity"), corstr="ar1"))
+
+```
+
+The estimate for $\alpha$ which relates to the $R_i(\alpha)$ structure for autogrissive (page 7) is 0.9982.
+
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}x_{1ij} + \beta_{2}*x_{2ij}*t_{j}^2  + \beta_{3}*x_{1ij}*t_{j}^2$$
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 for cluster 1.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 1 or 0 for cluster 2.
+
+Looking at the coefficients,
+$$g(E(y_{ij})) = 0.78033 + 0.6399*x_{1ij} + 0.2379*x_{2ij}*t_{j}^2  + 0.7254*x_{1ij}*t_{j}^2$$
+
+
+
+
+```{r}
+QIC(ar1.fitted.model)
+
+```
+
+
+The next model to try is 3 clusters in the form of $intercept + cluster + MonthYear^2 + cluster:MonthYear^2$
+
+```{r}
+
+#fitting GEE model with autoregressive working correlation matrix
+summary(ar1.fitted.model2 <- geeglm(PricePerSQFT ~ clusterThree*I(MonthYear^2) , data=train_data3, id=index, family=Gamma(link = "identity"), corstr="ar1"))
+
+```
+
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*x_{1ij} + \beta_{2}*x_{2ij}  + \beta_{3}*t^2 +  \beta_{4}*x_{1ij}*t_{j}^2  + \beta_{5}*x_{2ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 otherwise.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 3 or 0 otherwise.
+<!-- $x_{3ij$ is an indicator of whether the instance is 1 for cluster 4 or 0 otherwise. -->
+
+Looking at the coefficients and the estimate for $\alpha$ = 0.996,
+$$g(E(y_{ij})) = 1.6177 - 0.8886*x_{1ij} - 0.4866*x_{2ij} + 1.0079*t^2 - 0.7984*x_{1ij}*t_{j}^2 - 0.5844*x_{2ij}*t_{j}^2$$
+
+
+```{r}
+QIC(ar1.fitted.model2)
+
+```
+
+The next model to try is 6 clusters in the form of $intercept + cluster + MonthYear^2 + cluster:MonthYear^2$
+
+```{r}
+
+#fitting GEE model with autoregressive working correlation matrix
+summary(ar1.fitted.model3 <- geeglm(PricePerSQFT ~ clusterSix*I(MonthYear^2), data=train_data3, id=index, family=Gamma(link = "identity"), corstr="ar1"))
+
+```
+
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*x_{1ij} + \beta_{2}*x_{2ij} + \beta_{3}*x_{3ij} + \beta_{4}*x_{4ij} + \beta_{5}*x_{5ij}  + \beta_{6}*t^2 +  \beta_{7}*x_{1ij}*t_{j}^2  + \beta_{8}*x_{2ij}*t_{j}^2 + \beta_{9}*x_{3ij}*t_{j}^2 + \beta_{10}*x_{4ij}*t_{j}^2 + \beta_{11}*x_{5ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 otherwise.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 3 or 0 otherwise.
+$x_{3ij$ is an indicator of whether the instance is 1 for cluster 4 or 0 otherwise.
+$x_{4ij$ is an indicator of whether the instance is 1 for cluster 5 or 0 otherwise.
+$x_{5ij$ is an indicator of whether the instance is 1 for cluster 6 or 0 otherwise.
+
+Looking at the coefficients and the estimate for $\alpha$ = 0.989,
+$$g(E(y_{ij})) = 1.511 - 0.8745*x_{1ij} - 0.2664*x_{2ij} + 0.5261*x_{3ij} - 0.7331*x_{4ij} - 0.5330*x_{5ij}  + 0.8385*t^2 - 0.7091*x_{1ij}*t_{j}^2  - 0.3567*x_{2ij}*t_{j}^2 + 0.8845*x_{3ij}*t_{j}^2 - 0.5887*x_{4ij}*t_{j}^2 - 0.4736*x_{5ij}*t_{j}^2$$
+
+
+
+```{r}
+QIC(ar1.fitted.model3)
+
+```
+
+Among the three cluster options, 6 clusters performed best under the GEE model with auto regressive covariance structure.
+
+# ```{r}
+# 
+# resid_auxpanel(residuals=ar1.fitted.model3$residuals, predicted=ar1.fitted.model3$fitted.values)
+# 
+# ```
+# The variability of the higher for high predicted values and the extremes are high from looking at the Residual plot and qqplot respectively. This issue is something to consider for validity of assumption but for this thesis we'll focus on how well the model predicts compared to the Generalized Mixed effect model. 
+
+```{r}
+print("Auto-Regressive:")
+metrics_mod(model = ar1.fitted.model3, test_data = eval_data2, target_name = "PricePerSQFT")
+
+```
+The model is able to explain 93.70 percent of variability and has a root mean squared error of 11.9 cents. It performed less accurately compared to the mixed model. 
+
+The second trial is the exchangeable structure with using 3 different clusters. The first model is a exchangeable term with two clusters in the form of $intercept + MonthYear + cluster + MonthYear^2 + MonthYear^3 + cluster:MonthYear^2$
+
+```{r}
+#fitting GEE model with exchangeable working correlation matrix 
+summary(exch.fitted.model<- geeglm(PricePerSQFT ~ MonthYear + clusterTwo*I(MonthYear^2) + I(MonthYear^3) , data=train_data3, id=index, family=Gamma(link = "identity"), corstr="exchangeable"))
+
+```
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*t + \beta_{2}*x_{1ij} + \beta_{3}*t^2 + \beta_{4}*t^3 +  \beta_{5}*x_{1ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 for cluster 1.
+
+Looking at the coefficients and the estimate for $\alpha$ = 0.96,
+$$g(E(y_{ij})) = 0.7868 - 0.1083*t + 0.6491*x_{1ij} + 0.5395*t^2 - 0.2342*t^3 + 0.5395*x_{1ij}*t_{j}^2$$
+
+
+
+```{r}
+
+QIC(exch.fitted.model)
+
+```
+
+The next model to try is 3 clusters in the form of $intercept + MonthYear + cluster + MonthYear^2 + MonthYear^3 + cluster:MonthYear^2$
+
+```{r}
+#fitting GEE model with exchangeable working correlation matrix 
+summary(exch.fitted.model2 <- geeglm(PricePerSQFT ~ MonthYear + clusterThree*I(MonthYear^2) + I(MonthYear^3) , data=train_data3, id=index, family=Gamma(link = "identity"), corstr="exchangeable"))
+
+```
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*t + \beta_{2}*x_{1ij} + \beta_{3}*x_{2ij} + \beta_{4}*t^2 +  \beta_{5}*t^3 + \beta_{6}*x_{1ij}*t_{j}^2  + \beta_{7}*x_{2ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 otherwise.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 3 or 0 otherwise.
+
+Looking at the coefficients and the estimate for $\alpha$ = 0.908,
+$$g(E(y_{ij})) = 1.6311 - 0.1165*t - 0.8959*x_{1ij} - 0.4847*x_{2ij} + 1.4126*t^2 - 0.2574*t^3 - 0.8781*x_{1ij}*t_{j}^2 - 0.6426*x_{2ij}*t_{j}^2$$
+
+```{r}
+
+QIC(exch.fitted.model2)
+
+```
+
+
+The next model to try is 6 clusters in the form of $intercept + MonthYear + cluster + MonthYear^2 + MonthYear^3 + cluster:MonthYear^2$
+
+```{r}
+#fitting GEE model with exchangeable working correlation matrix 
+summary(exch.fitted.model3 <- geeglm(PricePerSQFT ~ MonthYear + clusterSix*I(MonthYear^2) + I(MonthYear^3) , data=train_data3, id=index, family=Gamma(link = "identity"), corstr="exchangeable"))
+
+```
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*t + \beta_{2}*x_{1ij} + \beta_{3}*x_{2ij} + \beta_{4}*x_{3ij} + \beta_{5}*x_{4ij}  + \beta_{6}*x_{5ij} + \beta_{7}*t^2 +  \beta_{8}*t^3 + \beta_{9}*x_{1ij}*t_{j}^2  + \beta_{10}*x_{2ij}*t_{j}^2 + \beta_{11}*x_{3ij}*t_{j}^2 + \beta_{12}*x_{4ij}*t_{j}^2 + \beta_{13}*x_{5ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 otherwise.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 3 or 0 otherwise.
+$x_{3ij$ is an indicator of whether the instance is 1 for cluster 4 or 0 otherwise.
+$x_{4ij$ is an indicator of whether the instance is 1 for cluster 5 or 0 otherwise.
+$x_{5ij$ is an indicator of whether the instance is 1 for cluster 6 or 0 otherwise.
+
+Looking at the coefficients and the estimate for $\alpha$ = 0.796,
+$$g(E(y_{ij})) = 1.5209 - 0.1294*t - 0.8799*x_{1ij} - 0.2614*x_{2ij} + 0.5449*x_{3ij} - 0.7291*x_{4ij}  - 0.5287*x_{5ij} + 1.2184*t^2 - 0.2616*t^3 - 0.7537*x_{1ij}*t_{j}^2 - 0.3678*x_{2ij}*t_{j}^2 + 1.0649*x_{3ij}*t_{j}^2 - 0.6103*x_{4ij}*t_{j}^2 - 0.4952*x_{5ij}*t_{j}^2$$
+
+
+```{r}
+QIC(exch.fitted.model3)
+
+```
+
+For the exchangeable covariance structure, 6 clusters also perfomed better than the other two clusters(2,4) 
+
+# ```{r}
+# 
+# resid_auxpanel(residuals=exch.fitted.model3$residuals, predicted=exch.fitted.model3$fitted.values)
+# 
+# ```
+# The resdiual plots show similar behavior compared to the autoregressive structure.
+
+```{r}
+print("Exchangeable:")
+metrics_mod(model = exch.fitted.model3, test_data = eval_data2, target_name = "PricePerSQFT")
+
+```
+The variability of the model explained is 93.59 percent and the root mean squared error is 12.4 cents. It not only performed less than the mixed model, but also the autoregressive structure.
+
+
+The third trial is a independence variance structure with 3 different clusters. The first model is a autoregressive term with two clusters in the form of $intercept + MonthYear + cluster + MonthYear^2 + MonthYear^3 + cluster:MonthYear^2$, index as id, and gamma distribution is family function for the response variable (PricePerSQFT).
+
+```{r}
+#fitting GEE model with independent working correlation matrix 
+summary(ind.fitted.model <- geeglm(PricePerSQFT ~  MonthYear + clusterTwo*I(MonthYear^2) + I(MonthYear^3), data=train_data3, id=index, family=Gamma(link = "identity"), corstr="independence"))
+```
+
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*t + \beta_{2}*x_{1ij} + \beta_{3}*t^2 + \beta_{4}*t^3 +  \beta_{5}*x_{1ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 for cluster 1.
+
+Looking at the coefficients,
+$$g(E(y_{ij})) = 0.7878 - 0.1083*t + 0.6425*x_{1ij} + 0.5399*t^2 - 0.2342*t^3 + 0.5361*x_{1ij}*t_{j}^2$$
+
+
+```{r}
+QIC(ind.fitted.model)
+
+```
+
+The next model to try is 3 clusters in the form of $intercept + cluster + MonthYear + MonthYear^2 + MonthYear^3 + cluster:MonthYear + cluster:MonthYear^3$
+
+```{r}
+
+summary(ind.fitted.model2 <- geeglm(PricePerSQFT ~  clusterThree*MonthYear + I(MonthYear^2) + clusterThree*I(MonthYear^3), data=train_data3, id=index, family=Gamma(link = "identity"), corstr="independence"))
+```
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*x_{1ij} + \beta_{2}*x_{2ij} + \beta_{3}*t +\beta_{4}*t^2 + \beta_{5}*t^3 + \beta_{6}*x_{1ij}*t_{j}  + \beta_{7}*x_{2ij}*t_{j} + \beta_{8}*x_{1ij}*t_{j}^3  + \beta_{9}*x_{2ij}*t_{j}^3$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 otherwise.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 3 or 0 otherwise.
+
+Looking at the coefficients,
+$$g(E(y_{ij})) = 1.6156 - 0.8769*x_{1ij} - 0.4823*x_{2ij} + 0.1039*t + 0.5975*t^2 + 0.5576*t^3 - 0.2438*x_{1ij}*t_{j} - 0.1392*x_{2ij}*t_{j} - 0.8622*x_{1ij}*t_{j}^3 - 0.7276*x_{2ij}*t_{j}^3$$
+
+
+```{r}
+QIC(ind.fitted.model2)
+
+```
+
+
+
+The third model of the independence structure is to use 6 clusters in the form of $intercept + cluster + MonthYear^2 + MonthYear^3 + cluster:MonthYear^2$
+
+
+```{r}
+
+summary(ind.fitted.model3 <- geeglm(PricePerSQFT ~  clusterSix  + I(MonthYear^2) + I(MonthYear^3) + clusterSix:I(MonthYear^2), data=train_data3, id=index, family=Gamma(link = "identity"), corstr="independence"))
+
+```
+the estimation of PricePerSQFT is
+$$g(E(y_{ij})) = \beta_{0} + \beta_{1}*x_{1ij} + \beta_{2}*x_{2ij} + \beta_{3}*x_{3ij} + \beta_{4}*x_{4ij}  + \beta_{5}*x_{5ij} + \beta_{6}*t^2 +  \beta_{7}*t^3 + \beta_{8}*x_{1ij}*t_{j}^2  + \beta_{9}*x_{2ij}*t_{j}^2 + \beta_{10}*x_{3ij}*t_{j}^2 + \beta_{11}*x_{4ij}*t_{j}^2 + \beta_{12}*x_{5ij}*t_{j}^2$$
+
+Note: $x_{1ij$ is an indicator of whether the instance is 1 for cluster 2 or 0 otherwise.
+$x_{2ij$ is an indicator of whether the instance is 1 for cluster 3 or 0 otherwise.
+$x_{3ij$ is an indicator of whether the instance is 1 for cluster 4 or 0 otherwise.
+$x_{4ij$ is an indicator of whether the instance is 1 for cluster 5 or 0 otherwise.
+$x_{5ij$ is an indicator of whether the instance is 1 for cluster 6 or 0 otherwise.
+
+Looking at the coefficients,
+$$g(E(y_{ij})) = 1.512 - 0.8766*x_{1ij} - 0.2635*x_{2ij} + 0.5414*x_{3ij} - 0.7309*x_{4ij} - 0.5304*x_{5ij} + 0.7738*t^2 +  0.1621*t^3 - 0.7533*x_{1ij}*t_{j}^2  - 0.3687*x_{2ij}*t_{j}^2 + 1.0619*x_{3ij}*t_{j}^2 - 0.6108*x_{4ij}*t_{j}^2 - 0.4958*x_{5ij}*t_{j}^2$$
+
+
+```{r}
+QIC(ind.fitted.model3)
+
+```
+
+For the independence covariance structure, 6 clusters also did best in terms of QIC.
+
+<!-- ```{r} -->
+
+<!-- resid_auxpanel(residuals=ind.fitted.model3$residuals, predicted=ind.fitted.model3$fitted.values) -->
+
+<!-- ``` -->
+
+<!-- The residual plots has the same properties as the previous two plots, yet we will test the performance on new data. -->
+
+
+```{r}
+#fitting GEE model with unstructured working correlation matrix 
+#summary(unstr.fitted.model<- geeglm(PricePerSQFT ~  MonthYear + cluster, data=train_data3, id=index, family=Gamma(link = "identity"), corstr="unstructured"))
+
+```
+
+```{r}
+#QIC(unstr.fitted.model)
+
+```
+
+
+```{r}
+print("Independence:")
+metrics_mod(model = ind.fitted.model3, test_data = eval_data2, target_name = "PricePerSQFT")
+
+```
+
+
+previous two results for comparison:
+```{r}
+print("Auto-Regressive:")
+metrics_mod(model = ar1.fitted.model3, test_data = eval_data2, target_name = "PricePerSQFT")
+
+```
+
+
+```{r}
+print("Exchangeable:")
+metrics_mod(model = exch.fitted.model3, test_data = eval_data2, target_name = "PricePerSQFT")
+
+```
+
+Overall, the best model for GEE is using the Auto-Regressive covariance strucutre involving 6 clusters. However; it still under performed compared to the mixed effects model.
+
+
+
+

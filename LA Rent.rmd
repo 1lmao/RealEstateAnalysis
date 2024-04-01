@@ -1,0 +1,679 @@
+---
+title: "LA Rent Section 3"
+author: "SM"
+date: "January 23, 2021"
+output: html_document
+---
+
+
+If the STRbook is not installed in R, uncomment the code below
+```{r}
+#install.packages("devtools")
+#library(devtools)
+#install_github("andrewzm/STRbook")
+
+
+
+```
+
+
+```{r}
+
+
+library('dplyr') 
+library('tidyr')
+library('STRbook')
+
+library('sp')
+
+library('spacetime')
+
+library(animation)
+library(ggplot2)
+
+library(gstat)
+library(maps)
+library(ggmap)
+
+
+
+library("grid")
+library("gridExtra")
+
+library(parallel)
+
+library(Metrics)
+
+
+library(ape) 
+
+library(FRK)
+
+library(gridExtra)
+
+
+
+
+```
+
+
+
+
+```{r}
+library('readr')
+
+data <- read_csv("./dataset3.csv")
+
+unique(data[,c('Year', 'Date')])
+
+data <- data %>%
+  separate(Tract, c("Tract_num", "County", "State"), ", ")
+
+data <- data %>%
+  separate(coord, c("Latitude", "Longitude"), ", ") %>%
+  mutate(Latitude = as.numeric(Latitude), Longitude=as.numeric(Longitude), Tract_Num = `Tract Number`, rowID = `Row ID`)  %>%
+  select(rowID, Tract_Num, Date, Year, Neighborhood, Amount, Latitude, Longitude)
+
+data_new <- na.omit(data)
+
+```
+
+
+
+```{r}
+ID_ST <- data_new %>%
+  distinct(Tract_Num, Year) %>%
+  group_by(Tract_Num) %>%
+  summarise(n = n()) %>%
+  filter(n == 7)
+
+data_new_copy <- data_new
+
+data_new_copy <- as.data.frame(data_new_copy)
+
+attr(data_new_copy, "na.action") <- NULL
+
+data_new_copy <- data_new_copy %>%
+  filter(Tract_Num %in% ID_ST$Tract_Num)
+
+data_new_copy$Tract_Num <- as.integer(data_new_copy$Tract_Num)
+data_new_copy$Neighborhood <- factor(data_new_copy$Neighborhood)
+data_new_copy$Date <- as.Date(data_new_copy$Date, format = "%m/%d/%Y")
+data_new_copy$Year <- as.integer(data_new_copy$Year)
+
+data_new_copy1 <- data_new_copy
+
+```
+
+
+
+```{r}
+space <- unique(data_new_copy1[,c("Tract_Num", "Latitude", "Longitude")]) %>%
+  arrange(Tract_Num)
+
+data_new_copy1 <- arrange(data_new_copy1, Year, Tract_Num)
+
+spat_part <- SpatialPoints(coords = space[, c("Longitude", "Latitude")])
+temp_part <- with(data_new_copy1, unique(Date))
+
+LA_STFDF <- STFDF(sp = spat_part,
+                  time = temp_part,
+                  data = data_new_copy1)
+
+set.seed(6)
+
+train_ID <- sample(unique(data_new$Tract_Num), round(0.8*length(unique(data_new$Tract_Num))))
+
+train_LA <- LA_STFDF[LA_STFDF@data$Tract_Num %in% train_ID]
+
+test_LA <- LA_STFDF[LA_STFDF@data$Tract_Num %in% setdiff(LA_STFDF@data$Tract_Num, train_ID)]
+
+
+
+```
+
+
+```{r fig.height=8, fig.width=10}
+qmplot(Longitude, Latitude, data=train_LA@data, alpha=I(0.6), color=Amount,
+       maptype = "watercolor", size=I(0.3), zoom=9) +
+  facet_wrap(.~Year, nrow = 2, ncol = 4) +  scale_color_gradient2("Median Price",
+                                              low = "blue"
+                                              , mid="green"
+                                              , high = "red"
+                                              , lim = c(0, 3500)
+                                              , midpoint = 1800) +
+  ggtitle("Training set")
+
+```
+
+
+
+```{r fig.height=8, fig.width=10}
+qmplot(Longitude, Latitude, data=test_LA@data, alpha=I(0.8), color=Amount,
+       maptype = "watercolor", size=I(1), zoom=9) +
+  facet_wrap(.~Year, nrow = 2, ncol = 4) +  scale_color_gradient2("Median Price",
+                                              low = "blue", mid="green", high = "red", lim = c(0, 3500), midpoint = 1800) +
+  ggtitle("Testing set")
+
+```
+
+
+```{r}
+train_LA@data$Year <- train_LA@data$Year - 2010L
+test_LA@data$Year <- test_LA@data$Year - 2010L
+
+```
+
+```{r}
+get_test <- function(model){
+  
+print(paste('AIC:', AIC(model)))
+print(paste('BIC:', BIC(model)))
+print(paste('deviance over degree of freedom:', model$deviance / model$df.residual))
+print(paste('degree of freedom:', model$df.residual))
+print(paste('deviance:', model$deviance))
+print(paste('p value:', 1 - pchisq(q = model$deviance, df = model$df.residual)))
+}
+```
+
+```{r}
+glm_model <- glm(Amount ~ Year + poly(Latitude, 2) + poly(Longitude, 2), data = train_LA, family = Gamma('log'))
+
+```
+
+```{r}
+summary(glm_model)
+
+get_test(glm_model)
+
+```
+
+```{r}
+visualize_resid <- function(data, model, type = "response", is_STobject=T, is_Year=T){
+  
+  if(is_STobject){
+    data <- data@data
+  }
+  
+  if(is_Year){
+    year <- data$Year + 2010L
+  }
+  else{
+    year <- data$Year
+  }
+  
+  data_new <- data %>%
+    mutate(residuals = residuals.glm(model, type = type), ypred = model$fitted.values, Year = as.factor(year))
+
+  
+  p1 <- data_new %>%
+    ggplot(aes(x = 1:length(residuals), y = residuals)) +
+    geom_point(aes(color = Year), alpha = 0.6) +
+    labs(x = "index")
+  
+  p2 <- data_new %>%
+    ggplot(aes(x=Year, y=residuals)) +
+    geom_boxplot() +
+    coord_flip()
+  
+  p3 <- data_new %>%
+    ggplot(aes(x = residuals)) +
+    geom_histogram(bins = 60, fill = 'green')
+  
+  p4 <- data_new %>%
+    ggplot(aes(x = ypred, y = residuals)) +
+    geom_point(aes(color = Year), alpha = 0.5) +
+    labs(x = 'predicted values', y = 'Residuals')
+  
+  grid.arrange(p1, p2, p3, p4, nrow = 2, ncol = 2)
+    
+}
+
+
+```
+
+
+```{r}
+visualize_resid(train_LA, glm_model)
+
+```
+
+
+```{r}
+compare_test <- function(test, model, is_STobject=T, is_YearInteger=T){
+    
+    if(is_STobject){
+      test <- test@data
+    }
+  
+    if(is_YearInteger){
+      year <- test$Year + 2010L
+    }
+    else{
+      year <- test$Year
+    }
+  
+    pred <- predict.glm(object = model, newdata = test, type = "response")
+  
+    test_new <- test %>%
+    mutate(prediction = pred)
+    p1 <-  qmplot(x = Longitude, y = Latitude, data = test_new, color = prediction, zoom = 9) +
+      col_scale(palette = "Spectral", limits = c(0, 3500), name = "Prediction") +
+      facet_wrap(~Year, ncol = 7)
+    
+    p2 <- qmplot(x = Longitude, y = Latitude, data = test, color = Amount, zoom = 9) +
+      col_scale(palette = "Spectral", limits = c(0, 3500), name = "Actual Data") +
+      facet_wrap(~Year, ncol = 7)
+    
+    grid.arrange(p1, p2, nrow = 2)
+}
+
+
+```
+
+```{r fig.height=8, fig.width=12}
+compare_test(test_LA, glm_model)
+
+```
+
+
+```{r}
+
+
+temp <- data.frame(residuals = glm_model$residuals, Longitude = glm_model$data@data$Longitude, Latitude = glm_model$data@data$Latitude, Year= glm_model$data@data$Year)
+
+
+P <- list() 
+years <- unique(temp$Year) 
+for(i in seq_along(years)) { 
+  Tmax_day <- filter(temp,
+                Year == years[i]) 
+  station.dists <- Tmax_day %>% 
+    select(Longitude, Latitude) %>% 
+    dist() %>% 
+    as.matrix() 
+  station.dists.inv <- 1/station.dists 
+  diag(station.dists.inv) <- 0 
+  P[[i]] <- Moran.I(Tmax_day$residuals,
+                station.dists.inv) %>%
+            do.call("cbind", .) 
+}
+
+
+```
+
+```{r}
+
+do.call("rbind", P)
+
+```
+
+```{r}
+Hov_plot <- function(data, dir_name, is_resid = F, model=NULL, is_STobject=T, is_yearInteger=T){
+
+if(is_STobject){
+  data <- data@data
+}  
+
+if(is_yearInteger){
+  data$year <- data$Year + 2010L
+}
+else {
+  data$year <- data$Year
+}
+  
+if (dir_name == "Latitude"){
+directions <- data$Latitude
+
+}
+else if (dir_name == "Longitude"){
+directions <- data$Longitude
+
+}
+lim_lat <- range(directions)
+    
+lim_t <- range(data$year)
+
+lat_axis <- seq(lim_lat[1],
+                lim_lat[2],
+                length=25)
+
+t_axis <- seq(lim_t[1],
+              lim_t[2],
+              length=7)
+
+lat_t_grid <- expand.grid(lat = lat_axis, t = t_axis)  
+
+data2_grid <- data
+dists <- abs(outer(directions, lat_axis, '-'))
+data2_grid$lat <- lat_axis[apply(dists, 1, which.min)]
+
+
+if (is_resid == T){
+  metric <- "Residuals"  
+  data2_grid <- data2_grid %>% mutate(residuals = residuals(model, type = "response"))
+  data2_lat_Hov <- group_by(data2_grid, lat, year) %>%
+  summarise(z = mean(residuals))
+}
+else {
+  metric <- "Amount"
+  data2_lat_Hov <- group_by(data2_grid, lat, year) %>%
+    summarise(z = mean(Amount))
+}
+
+
+ggplot(data2_lat_Hov) +
+  geom_tile(aes(x = lat, y = year, fill = z)) +
+  fill_scale(name = metric) +
+  scale_y_reverse() +
+  ylab('Year') +
+  xlab(paste(dir_name,'(Deg)')) +
+  theme_bw()
+
+}
+
+
+
+```
+
+
+
+```{r}
+coord_plot <- function(train_data, model=NULL, year=0, length = 25, is_STobject=T, is_resid=T){
+  
+  if(is_STobject){
+    
+    data <- train_data@data %>%
+      mutate(residuals = residuals(model, type="response")) %>%
+      filter(Year == year)
+    
+  }
+  
+  else {
+    data <- train_data %>%
+      mutate(residuals = residuals(model, type="response")) %>%
+      filter(Year == year)
+  }
+  
+  lim_lat <- range(data$Latitude)
+  lim_long <- range(data$Longitude)
+  
+  lat_axis <- seq(lim_lat[1],
+                  lim_lat[2],
+                  length=length)
+  
+  long_axis <- seq(lim_long[1],
+                lim_long[2],
+                length=length)
+  
+  lat_t_grid <- expand.grid(lat = lat_axis, long = long_axis)  
+  
+  data2_grid <- data
+  dists <- abs(outer(data$Latitude, lat_axis, '-'))
+  data2_grid$lat <- lat_axis[apply(dists, 1, which.min)]
+  
+  dists <- abs(outer(data$Longitude, long_axis, '-'))
+  data2_grid$long <- long_axis[apply(dists, 1, which.min)]
+  
+  
+  if (is_resid == T){
+    metric <- "Residuals"  
+    data2_lat_Hov <- group_by(data2_grid, lat, long) %>%
+      summarise(z = mean(residuals), var = var(residuals))
+  }
+  else {
+    metric <- "Avg. $"
+    data2_lat_Hov <- group_by(data2_grid, lat, long) %>%
+      summarise(z = mean(Amount), var = var(Amount))
+  }
+  
+  p1 <- qmplot(data=data2_lat_Hov, x = long, y=lat, zoom = 9) +
+    geom_tile(aes(x = long, y = lat, fill = z)) +
+    fill_scale(name = metric) +
+    scale_y_reverse() +
+    ylab('Latitude (Deg)') +
+    xlab('Longitude (Deg)') +
+    ggtitle('Year:', year+2010) +
+    theme_classic()
+  
+  p2 <- qmplot(data=data2_lat_Hov, x = long, y=lat, zoom = 9) +
+    geom_tile(aes(x = long, y = lat, fill = var)) +
+    fill_scale(name = paste0('Variance Of ', metric)) +
+    scale_y_reverse() +
+    ylab('Latitude (Deg)') +
+    xlab('Longitude (Deg)') +
+    theme_classic()
+  
+  grid.arrange(p1, p2, nrow = 2)
+  
+}
+
+
+```
+
+
+```{r}
+model_by_year <- function(train_data, test_data, model, date, use_log=F, return_Data=F){
+
+  train_year <- train_data[, date]
+
+  test_year <- test_data[, date]
+
+  if(length(model$residuals) == nrow(train_year@data)){
+  train_year@data$residuals <- residuals.glm(model, train_year@data, type = "response")
+  } else{
+    temp <- train_data@data %>%
+      mutate(residuals = residuals.glm(model, train_data@data, type='response')) %>%
+      filter(Year == as.numeric(format(as.Date(date), "%Y"))-2010L) %>%
+      select(residuals) %>%
+      as.vector()
+    
+    train_year@data$residuals <- temp$residuals
+  }
+
+  vario_year <- variogram(residuals ~ 1, train_year, width=0.01)
+
+  (m <- fit.variogram(vario_year, vgm("Mat"), fit.kappa = T, fit.sills = T, fit.ranges = T))
+
+  m1 <- fit.variogram(vario_year, vgm("Exp"), fit.sills = T, fit.kappa = T, fit.ranges = T)
+
+  m2 <- fit.variogram(vario_year, vgm("Gau"), fit.sills = T, fit.kappa = T, fit.ranges = T)
+
+  m3 <- fit.variogram(vario_year, vgm("Sph"), fit.sills = T, fit.kappa = T, fit.ranges = T)
+
+  vector <- c(attr(m, "SSErr"), attr(m1, "SSErr"), attr(m2, "SSErr"), attr(m3, "SSErr"))
+
+  models <- list(m, m1, m2, m3)
+  
+  ind <- which.min(vector)
+  
+  best_model <- models[[ind]]
+  
+  print(best_model)
+  
+
+  print(plot(vario_year, model=best_model, main=paste('Variogram of', strsplit(date, split='-')[[1]][1])))
+  
+  x_year <- krige(residuals ~ 1, train_year, test_year, model=best_model)
+
+  if(use_log){
+
+    pred11 <- exp(predict.glm(model, newdata = test_year, type = "response"))
+
+    pred1 <- exp(x_year@data$var1.pred)*pred11
+  }
+  else{
+
+  pred11 <- predict.glm(model, newdata = test_year, type = "response")
+
+  pred1 <- x_year@data$var1.pred + pred11 
+  }
+
+  attr(pred1, "names") <- NULL
+  attr(pred11, "names") <- NULL
+
+  TEST_year <- test_year@data %>%
+    mutate(rr = Amount - pred1)
+
+  new_value <- rmse( 100*pred1/test_year@data$Amount, 100)
+  original <- rmse( 100*pred11/test_year@data$Amount, 100)
+ 
+  new_value <- rmse(pred1, test_year@data$Amount)
+  original <- rmse(pred11, test_year$Amount)
+  
+  print("The root mean squared error:")
+  print(paste0("without krige --", original))
+  print(paste0("with krige --", new_value))
+
+  new_value <- mae(pred1, test_year@data$Amount)
+  original <- mae(pred11, test_year$Amount)
+  
+
+  print("The mean absolute error:")
+  print(paste0("without krige --", original))
+  print(paste0("with krige --", new_value))
+
+  print(paste0("R-squared w/o krige: ", 1 - var(TEST_year$Amount - pred11)/var(TEST_year$Amount) ))
+  print(paste0("R-squared w/ krige: ",  1 - var(TEST_year$rr)/var(TEST_year$Amount) ))      
+  if(return_Data){
+    return(TEST_year)
+  }
+  
+}
+
+
+```
+
+
+
+
+```{r}
+plot_test <- function(test_data, filter_value=0, year=0){
+  
+  test_year <- test_data 
+  filter_rows <- abs(test_data$rr) > filter_value
+    qmplot(x = Longitude, y=Latitude, data=test_year[filter_rows, ], alpha=I(1), color=rr,
+              maptype="toner-hybrid", zoom=9, size=I(2), xlim = c(-118.9, -117.7)) +
+      scale_color_gradient2("residuals",
+                                              low = "green", mid="red", high = "cyan", lim = c(min(test_year$rr), max(test_year$rr)), midpoint = 0) +
+      ggtitle(paste0("Year: ", year+2010))
+  
+}
+
+```
+
+
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 0, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 0, length = 20, is_resid = T)
+
+
+
+```
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 1, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 1, length = 20, is_resid = T)
+
+```
+
+
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 2, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 2, length = 20, is_resid = T)
+
+```
+
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 3, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 3, length = 20, is_resid = T)
+
+```
+
+
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 4, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 4, length = 20, is_resid = T)
+
+```
+
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 5, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 5, length = 20, is_resid = T)
+
+```
+
+
+```{r fig.height=12, fig.width=6}
+coord_plot(train_data = train_LA, model = glm_model, year = 6, length = 20, is_resid = F)
+coord_plot(train_data = train_LA, model = glm_model, year = 6, length = 20, is_resid = T)
+
+```
+
+
+```{r}
+Hov_plot(train_LA, dir_name = "Longitude", is_resid = F, model=NULL)
+Hov_plot(train_LA, dir_name = "Longitude", is_resid = T, model = glm_model)
+
+```
+
+```{r}
+Hov_plot(train_LA, dir_name = "Latitude", is_resid = F, model=NULL)
+Hov_plot(train_LA, dir_name = "Latitude", is_resid = T, model = glm_model)
+
+```
+
+
+```{r warning=FALSE}
+test_2010 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2010-01-01', return_Data = T)
+plot_test(test_2010, 250, year=0) 
+```
+
+
+```{r warning=FALSE}
+test_2011 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2011-01-01', return_Data = T)
+plot_test(test_2011, 250, year=1) 
+
+```
+
+
+```{r warning=FALSE}
+test_2012 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2012-01-01', return_Data = T)
+plot_test(test_2012, 250, year=2)
+
+```
+
+
+```{r warning=FALSE}
+test_2013 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2013-01-01', return_Data = T)
+plot_test(test_2013, 250, year=3)
+```
+
+
+
+```{r warning=FALSE}
+test_2014 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2014-01-01', return_Data = T)
+plot_test(test_2014, 250, year=4) 
+
+```
+
+
+```{r warning=FALSE}
+test_2015 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2015-01-01', return_Data = T)
+plot_test(test_2015, 250, year=5) 
+
+```
+
+```{r warning=FALSE}
+test_2016 <- model_by_year(train_data = train_LA, test_data = test_LA, model = glm_model, date = '2016-01-01', return_Data = T)
+plot_test(test_2016, 250, year=6)
+
+```
+
+
+
